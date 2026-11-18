@@ -1,0 +1,181 @@
+name: release
+
+# Release runner. This repository is public only so that macOS runners are free.
+# It holds no app source: each run checks out the private source repository with
+# a read-only deploy key, then builds, signs, notarizes and uploads to private R2
+# storage. Run it manually (Actions -> release -> Run workflow) with a tag such as
+# v3.0.0. No pull_request or push trigger exists, so forks cannot reach the secrets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or branch of troxerr/HighlightDesk to release (for example v3.0.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'troxerr/chatclip-release'
+    name: ${{ matrix.arch }} signed release
+    runs-on: ${{ matrix.os }}
+    # One architecture at a time: both jobs read-modify-write the same appcast.xml.
+    strategy:
+      max-parallel: 1
+      fail-fast: true
+      matrix:
+        include:
+          - os: macos-15
+            arch: arm64
+          - os: macos-15-intel
+            arch: x86_64
+    env:
+      PYTHON: python3
+      HIGHLIGHT_DESK_KEYCHAIN: "0"
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - name: Check out the private source
+        uses: actions/checkout@v4
+        with:
+          repository: troxerr/HighlightDesk
+          ref: ${{ inputs.ref }}
+          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check required secrets
+        env:
+          HAVE_CERT: ${{ secrets.MACOS_CERT_P12 != '' }}
+          HAVE_NOTARY: ${{ secrets.APPLE_API_KEY_P8 != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' }}
+          HAVE_SPARKLE: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
+          HAVE_R2: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && secrets.R2_BUCKET != '' }}
+          HAVE_VARS: ${{ vars.R2_PUBLIC_BASE_URL != '' && vars.SU_PUBLIC_ED_KEY != '' && vars.LEMON_PRODUCT_ID != '' }}
+        run: |
+          fail=0
+          for name in HAVE_CERT HAVE_NOTARY HAVE_SPARKLE HAVE_R2 HAVE_VARS; do
+            if [[ "${!name}" != "true" ]]; then echo "::error::Missing configuration: $name"; fail=1; fi
+          done
+          exit $fail
+
+      - name: Check tag matches app version
+        env:
+          RELEASE_REF: ${{ inputs.ref }}
+        run: |
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' mac/Info.plist)"
+          if [[ "$RELEASE_REF" == v* && "$RELEASE_REF" != "v$VERSION" ]]; then
+            echo "::error::Ref $RELEASE_REF does not match CFBundleShortVersionString $VERSION"
+            exit 1
+          fi
+
+      - name: Install test media tools
+        run: brew install ffmpeg
+
+      - name: Fetch Sparkle
+        run: ./tools/fetch-sparkle.sh
+
+      - name: Build bundled LGPL FFmpeg + Streamlink
+        run: ./tools/build-runtime.sh
+
+      - name: Tests
+        run: |
+          PATH="$PWD/mac/runtime/$(uname -m)/bin:$PATH" npm test
+          npm run check
+
+      - name: Import signing certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          echo "::add-mask::$KEYCHAIN_PASSWORD"
+          echo "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -P "$MACOS_CERT_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          IDENTITY="$(security find-identity -v -p codesigning "$KEYCHAIN" | sed -n 's/.*"\(Developer ID Application:[^"]*\)".*/\1/p' | head -1)"
+          if [[ -z "$IDENTITY" ]]; then echo "::error::No Developer ID Application identity in the certificate"; exit 1; fi
+          echo "DEVELOPER_ID_APPLICATION=$IDENTITY" >> "$GITHUB_ENV"
+          echo "RELEASE_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build app
+        env:
+          LICENSE_REQUIRED: "1"
+          TRIAL_DAYS: ${{ vars.TRIAL_DAYS }}
+          LEMON_PRODUCT_ID: ${{ vars.LEMON_PRODUCT_ID }}
+          CHECKOUT_URL: ${{ vars.CHECKOUT_URL }}
+          SU_FEED_URL: ${{ vars.R2_PUBLIC_BASE_URL }}/appcast.xml
+          SU_PUBLIC_ED_KEY: ${{ vars.SU_PUBLIC_ED_KEY }}
+          DROPBOX_APP_KEY: ${{ vars.DROPBOX_APP_KEY }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+        run: ./mac/build.sh
+
+      - name: Sign, notarize and staple
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH"
+          chmod 600 "$APPLE_API_KEY_PATH"
+          ./mac/release.sh
+          rm -f "$APPLE_API_KEY_PATH"
+
+      - name: Upload to R2 and update the appcast
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' mac/Info.plist)"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' mac/Info.plist)"
+          DMG="mac/build/Chatclip-${VERSION}-${ARCH}.dmg"
+          DMG_NAME="$(basename "$DMG")"
+
+          aws s3 cp "$DMG" "s3://${R2_BUCKET}/releases/${DMG_NAME}" --endpoint-url "$ENDPOINT" --content-type application/x-apple-diskimage
+
+          export SPARKLE_KEY_FILE="$RUNNER_TEMP/sparkle_ed_key"
+          printf '%s' "$SPARKLE_PRIVATE_KEY" > "$SPARKLE_KEY_FILE"
+          chmod 600 "$SPARKLE_KEY_FILE"
+
+          EXISTING="$RUNNER_TEMP/appcast-existing.xml"
+          aws s3 cp "s3://${R2_BUCKET}/appcast.xml" "$EXISTING" --endpoint-url "$ENDPOINT" 2>/dev/null || rm -f "$EXISTING"
+
+          VERSION="$VERSION" BUILD="$BUILD" DMG="$DMG" \
+          DOWNLOAD_URL="${R2_PUBLIC_BASE_URL}/releases/${DMG_NAME}" \
+          EXISTING_APPCAST="$EXISTING" OUTPUT="$RUNNER_TEMP/appcast.xml" \
+          ./tools/make-appcast.sh
+
+          aws s3 cp "$RUNNER_TEMP/appcast.xml" "s3://${R2_BUCKET}/appcast.xml" --endpoint-url "$ENDPOINT" \
+            --content-type application/xml --cache-control "no-cache"
+          rm -f "$SPARKLE_KEY_FILE"
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          if [[ -n "${RELEASE_KEYCHAIN:-}" ]]; then security delete-keychain "$RELEASE_KEYCHAIN" || true; fi
+          rm -f "$RUNNER_TEMP/AuthKey.p8" "$RUNNER_TEMP/sparkle_ed_key" "$RUNNER_TEMP/cert.p12"
