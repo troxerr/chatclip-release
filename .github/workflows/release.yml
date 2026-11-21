@@ -41,7 +41,7 @@ jobs:
             arch: x86_64
     env:
       PYTHON: python3
-      HIGHLIGHT_DESK_KEYCHAIN: "0"
+      CHATCLIP_KEYCHAIN: "0"
       ARCH: ${{ matrix.arch }}
     steps:
       - name: Check out the source
@@ -158,7 +158,7 @@ jobs:
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' mac/Info.plist)"
           BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' mac/Info.plist)"
-          DMG="mac/build/Chatclip-${VERSION}-${ARCH}.dmg"
+          DMG="mac/build/ChatClip-${VERSION}-${ARCH}.dmg"
           DMG_NAME="$(basename "$DMG")"
 
           aws s3 cp "$DMG" "s3://${R2_BUCKET}/releases/${DMG_NAME}" --endpoint-url "$ENDPOINT" --content-type application/x-apple-diskimage
