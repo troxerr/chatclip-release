@@ -1,20 +1,19 @@
 name: release
 
 # Release runner. This repository is public only so that macOS runners are free.
-# It holds no app source: each run checks out the private source repository with
-# a read-only deploy key, then builds, signs, notarizes and uploads to private R2
+# It holds no app source: each run checks out the public source repository
+# (troxerr/chat-clip) with the default token, then builds, signs, notarizes and uploads to private R2
 # storage. Run it manually (Actions -> release -> Run workflow) with a tag such as
 # v3.0.0. No pull_request or push trigger exists, so forks cannot reach the secrets.
 
-# OPEN DECISION: the source repository checked out below (troxerr/HighlightDesk,
-# here and in the ref input description) has intentionally NOT been changed. Which
-# repo to release from is deferred to the repository owner; update both places together.
+# Source repo: troxerr/chat-clip is the source of truth for the app. It is public,
+# so no deploy key is needed to check it out.
 
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Tag or branch of troxerr/HighlightDesk to release (for example v3.0.0)"
+        description: "Tag or branch of troxerr/chat-clip to release (for example v3.0.0)"
         required: true
         type: string
 
@@ -45,12 +44,11 @@ jobs:
       HIGHLIGHT_DESK_KEYCHAIN: "0"
       ARCH: ${{ matrix.arch }}
     steps:
-      - name: Check out the private source
+      - name: Check out the source
         uses: actions/checkout@v4
         with:
-          repository: troxerr/HighlightDesk
+          repository: troxerr/chat-clip
           ref: ${{ inputs.ref }}
-          ssh-key: ${{ secrets.SOURCE_DEPLOY_KEY }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
