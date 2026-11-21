@@ -6,6 +6,10 @@ name: release
 # storage. Run it manually (Actions -> release -> Run workflow) with a tag such as
 # v3.0.0. No pull_request or push trigger exists, so forks cannot reach the secrets.
 
+# OPEN DECISION: the source repository checked out below (troxerr/HighlightDesk,
+# here and in the ref input description) has intentionally NOT been changed. Which
+# repo to release from is deferred to the repository owner; update both places together.
+
 on:
   workflow_dispatch:
     inputs:
@@ -61,10 +65,11 @@ jobs:
           HAVE_NOTARY: ${{ secrets.APPLE_API_KEY_P8 != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' }}
           HAVE_SPARKLE: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
           HAVE_R2: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && secrets.R2_BUCKET != '' }}
-          HAVE_VARS: ${{ vars.R2_PUBLIC_BASE_URL != '' && vars.SU_PUBLIC_ED_KEY != '' && vars.LEMON_PRODUCT_ID != '' }}
+          HAVE_VARS: ${{ vars.R2_PUBLIC_BASE_URL != '' && vars.SU_PUBLIC_ED_KEY != '' && vars.LEMON_PRODUCT_ID != '' && vars.CHECKOUT_URL != '' && vars.DROPBOX_APP_KEY != '' && vars.GOOGLE_CLIENT_ID != '' }}
+          HAVE_GOOGLE_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET != '' }}
         run: |
           fail=0
-          for name in HAVE_CERT HAVE_NOTARY HAVE_SPARKLE HAVE_R2 HAVE_VARS; do
+          for name in HAVE_CERT HAVE_NOTARY HAVE_SPARKLE HAVE_R2 HAVE_VARS HAVE_GOOGLE_SECRET; do
             if [[ "${!name}" != "true" ]]; then echo "::error::Missing configuration: $name"; fail=1; fi
           done
           exit $fail
@@ -127,7 +132,7 @@ jobs:
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: ./mac/build.sh
 
-      - name: Sign, notarize and staple
+      - name: Sign, notarize, staple and verify
         env:
           APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -136,7 +141,9 @@ jobs:
           export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
           printf '%s' "$APPLE_API_KEY_P8" > "$APPLE_API_KEY_PATH"
           chmod 600 "$APPLE_API_KEY_PATH"
+          ./mac/release.sh --check
           ./mac/release.sh
+          ./mac/release.sh --verify
           rm -f "$APPLE_API_KEY_PATH"
 
       - name: Upload to R2 and update the appcast
