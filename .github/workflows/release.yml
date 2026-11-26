@@ -41,7 +41,7 @@ jobs:
             arch: x86_64
     env:
       PYTHON: python3
-      CHATCLIP_KEYCHAIN: "0"
+      CLIPSPIKE_KEYCHAIN: "0"
       ARCH: ${{ matrix.arch }}
     steps:
       - name: Check out the source
@@ -63,7 +63,7 @@ jobs:
           HAVE_NOTARY: ${{ secrets.APPLE_API_KEY_P8 != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' }}
           HAVE_SPARKLE: ${{ secrets.SPARKLE_PRIVATE_KEY != '' }}
           HAVE_R2: ${{ secrets.R2_ACCOUNT_ID != '' && secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && secrets.R2_BUCKET != '' }}
-          HAVE_VARS: ${{ vars.R2_PUBLIC_BASE_URL != '' && vars.SU_PUBLIC_ED_KEY != '' && vars.LEMON_PRODUCT_ID != '' && vars.CHECKOUT_URL != '' && vars.DROPBOX_APP_KEY != '' && vars.GOOGLE_CLIENT_ID != '' }}
+          HAVE_VARS: ${{ vars.R2_PUBLIC_BASE_URL != '' && vars.SU_PUBLIC_ED_KEY != '' && vars.DROPBOX_APP_KEY != '' && vars.GOOGLE_CLIENT_ID != '' }}
           HAVE_GOOGLE_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET != '' }}
         run: |
           fail=0
@@ -121,14 +121,23 @@ jobs:
         env:
           LICENSE_REQUIRED: "1"
           TRIAL_DAYS: ${{ vars.TRIAL_DAYS }}
-          LEMON_PRODUCT_ID: ${{ vars.LEMON_PRODUCT_ID }}
-          CHECKOUT_URL: ${{ vars.CHECKOUT_URL }}
           SU_FEED_URL: ${{ vars.R2_PUBLIC_BASE_URL }}/appcast.xml
           SU_PUBLIC_ED_KEY: ${{ vars.SU_PUBLIC_ED_KEY }}
           DROPBOX_APP_KEY: ${{ vars.DROPBOX_APP_KEY }}
           GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
-        run: ./mac/build.sh
+        run: |
+          set -euo pipefail
+          # The release check compares the built app to win/build-config.json.
+          # Read the offer from that file so a stale Actions variable cannot fail it.
+          export LEMON_API_BASE="$(node -p "require('./win/build-config.json').apiBase")"
+          export LEMON_PRODUCT_ID="$(node -p "require('./win/build-config.json').productId")"
+          export CHECKOUT_URL="$(node -p "require('./win/build-config.json').checkoutUrl")"
+          export PRICE_LABEL="$(node -p "require('./win/build-config.json').priceLabel")"
+          if [[ -z "${TRIAL_DAYS:-}" ]]; then
+            export TRIAL_DAYS="$(node -p "require('./win/build-config.json').trialDays")"
+          fi
+          ./mac/build.sh
 
       - name: Sign, notarize, staple and verify
         env:
@@ -158,7 +167,7 @@ jobs:
           ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
           VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' mac/Info.plist)"
           BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' mac/Info.plist)"
-          DMG="mac/build/ChatClip-${VERSION}-${ARCH}.dmg"
+          DMG="mac/build/ClipSpike-${VERSION}-${ARCH}.dmg"
           DMG_NAME="$(basename "$DMG")"
 
           aws s3 cp "$DMG" "s3://${R2_BUCKET}/releases/${DMG_NAME}" --endpoint-url "$ENDPOINT" --content-type application/x-apple-diskimage
